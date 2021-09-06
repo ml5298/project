@@ -1,0 +1,1970 @@
+---
+title: "Dissertation Project - Code"
+author: "Maria Loizou"
+output:
+  html_document:
+    number_sections: no
+    toc: yes
+    toc_float: yes
+    code_download: yes
+    code_folding: hide
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+These libraries have wide range of functions and are quite useful for this study's operations. 
+```{r,message=FALSE,include==FALSE}
+library(spacetime)
+library(rgdal)
+library(shapefiles)
+library(rjson)
+library(readxl)
+library(tidyverse)
+library(readr)
+library(broom)
+library(janitor)
+library(viridis)
+library(dichromat)
+library(patchwork)
+library(tmap)
+library(dplyr)
+library(purrr)
+library(data.table)
+library(leaflet)
+library(knitr)
+library(kableExtra)
+library(plotly)
+library(sp)
+library(corrplot)
+library(gghighlight)
+library(spacetime)
+library(lubridate)
+library(MASS)
+library(lmtest)
+library(FRK)
+library(jtools)
+library(sf)
+library(ggplot2)
+library(ggiraph)
+library(colormap)
+library(spdep)
+install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+library(INLA)
+library(rmarkdown)
+library(ggiraph)
+library(colormap)
+library(dygraphs)
+library(echarts4r)
+library(ggthemes)
+library(gganimate)
+library(spdep)
+library(dplyr)
+```
+
+### __*1. Reading the files.*__
+
+Reading the shapefile.
+```{r, message=FALSE}
+cyprus_shp <- readOGR(file.choose())
+head(cyprus_shp@data)
+```
+
+Reading the demographic data file.
+```{r}
+demographic_data <- read_csv(file.choose()) %>% janitor::clean_names()
+head(demographic_data)
+```
+
+We read the covid data file.
+```{r}
+covid_data_original <- read_csv(file.choose()) %>% janitor::clean_names() 
+head(covid_data_original)
+covid_data <- covid_data_original
+```
+
+
+### __*2. Modifications/Additions in the datasets.*__
+
+We rename the column VIL_NM_E in the shapefile as municipality_town_lst in order to make any join of dataframes allowed.
+```{r}
+cyprus_shp@data <- cyprus_shp@data %>% rename(municipality_town_lst = "VIL_NM_E")
+```
+
+There are two villages with the same name which belong to different districts. Their names are replaced displaying their district.
+```{r}
+cyprus_shp@data$municipality_town_lst[cyprus_shp@data$municipality_town_lst=="AGIA VARVARA"& cyprus_shp@data$DIST_CODE==1] <- "AGIA VARVARA LEFKOSIA" 
+cyprus_shp@data$municipality_town_lst[cyprus_shp@data$municipality_town_lst=="AGIA VARVARA"& cyprus_shp@data$DIST_CODE==6] <- "AGIA VARVARA PAFOS"
+```
+
+Creating a new column in the shapefile which will contain the id of each municipality/community. 
+```{r}
+cyprus_shp$id <- as.character(0:614)
+```
+
+Modifying the class of the shapefile from SpatialPOlygonDataFrame to DataFrame using tidy which gives the coordinates of each polygon corner. 
+```{r}
+cyprus_tidy <- tidy(cyprus_shp)
+cyprus_tidy <- left_join(cyprus_tidy,cyprus_shp@data) %>% dplyr::select(2,6)
+```
+
+Creating new columns in order to separate age groups into a smaller number of groups. In particular we have, children (Ages 0-19), youth (Ages 20-39), middle ages (Ages 40-59) and seniors (Ages 60-80+) for both gender.
+
+```{r}
+demographic_data <- demographic_data %>%
+  mutate(children_male = male_0_4 + male_5_9 + male_10_14 + male_15_19,
+         children_female = female_0_4 + female_5_9 + female_10_14 + female_15_19,
+         youth_male = male_20_24 + male_25_29 + male_30_34 + male_35_39,
+         youth_female = female_20_24 + female_25_29 + female_30_34 + female_35_39,
+         middle_ages_male = male_40_44 + male_45_49 + male_50_54 + male_55_59,
+         middle_ages_female = female_40_44 + female_45_49 + female_50_54 + female_55_59,
+         seniors_male = male_60_64 + male_65_69 + male_70_74 + male_75_79 + male_80,
+         seniors_female = female_60_64 + female_65_69 + female_70_74 + female_75_79 + female_80)
+```
+
+```{r}
+demographic_data <- demographic_data %>%
+                      mutate(children_total = children_male + children_female,
+                             youth_total = youth_male + youth_female,
+                             middle_ages_total = middle_ages_male + middle_ages_female,
+                             seniors_total = seniors_male + seniors_female)
+```
+
+
+The below code finds which municipalities/communities are included in the demographic data. We can observe that only TROODOS is not included. Thus, we decide to drop it from the data.
+```{r}
+list1 <- unique(covid_data$municipality_town_lst)
+list2 <- unique(demographic_data$name)
+sum <- 0
+
+for (i in 1:length(list1)){
+  if (! (list1[i] %in% list2)) {
+    print(list1[i])
+  }
+}
+
+for (i in 1:length(list1)){
+  if (list1[i] %in% list2) {
+    sum <- sum + 1
+  }
+}
+sum # We have in total 325 municipalities/communities.
+```
+Data wrangling and cleaning. Values in some age groups records are of wrong format and thus they extract wrong content. More precisely, there are records with age group as 05-Sep and Oct-14. These values correspond to 05-09 and 10-14 years respectively and are being replaced with the correct ones.
+```{r}
+covid_data$age_group[covid_data$age_group=="05-Sep"] <- "05-09"
+covid_data$age_group[covid_data$age_group=="Oct-14"] <- "10-14"
+```
+
+
+From the original Covid data file we exclude one record referring to TROODOS, we mutate dates to Date format and we select only dates before 29/03/2021.
+Our aim is to relate this dataframe to the demographic data, thus some modifications needed. We will first change age groups which start with zero to be only as two digits age groups. Also, people with age more than 80 will be replaced with 80+.
+In variables age_group and sex_lst there are some unknown values. Therefore, our decision is to replace the unknown values with a  random vector of the valid values.
+
+```{r}
+vill_names <- unique(demographic_data$name)
+
+for (i in 1:nrow(covid_data)) {
+  if (covid_data$sex_lst[i] == "Unknown"){
+    municipality_name <- covid_data$municipality_town_lst[i]
+    idn <- match(municipality_name,vill_names,0)
+    
+    if (idn > 0) {
+      num_female <- demographic_data$female_population[idn]
+      num_male <- demographic_data$male_population[idn]
+      total <- demographic_data$total_population[idn]
+      
+      p_female <- num_female / total
+      p_male <- num_male / total
+      replace_unk_sex <- sample(c("Female","Male"), 1, prob = c(p_female,p_male))
+      covid_data$sex_lst[i] <- replace_unk_sex
+    } 
+  }
+}    
+
+
+
+covid_data <- covid_data %>%
+                mutate(lab_result_date = as.Date(lab_result_date,"%d/%m/%Y"),
+                       date_of_first_sampling = as.Date(date_of_first_sampling,"%d/%m/%Y"),
+                       age_group = ifelse(age_group == "00-04","0-4",age_group),
+                       age_group = ifelse(age_group == "05-09","5-9",age_group),
+                       age_group = ifelse(age_group %in% c("80-84","85-89","90+"),"80",age_group)) %>%
+                  filter(municipality_town_lst != "TROODOS") %>%
+                    filter(lab_result_date <= as.Date("2021-03-28") & date_of_first_sampling <= as.Date("2021-03-28"))
+
+for (i in 1:nrow(covid_data)) {
+  if (covid_data$age_group[i] == "Unk"){
+    municipality_name <- covid_data$municipality_town_lst[i]
+    idn <- match(municipality_name,vill_names,0)
+    
+    if (idn > 0) {
+      if(covid_data$sex_lst[i] == "Female"){
+        total_female <- demographic_data$female_population[idn]
+        
+        p_female_0_4 <- demographic_data$female_0_4[idn] / total_female
+        p_female_5_9 <- demographic_data$female_5_9[idn] / total_female
+        p_female_10_14 <- demographic_data$female_10_14[idn] / total_female
+        p_female_15_19 <- demographic_data$female_15_19[idn] / total_female
+        p_female_20_24 <- demographic_data$female_20_24[idn] / total_female
+        p_female_25_29 <- demographic_data$female_25_29[idn] / total_female
+        p_female_30_34 <- demographic_data$female_30_34[idn] / total_female
+        p_female_35_39 <- demographic_data$female_35_39[idn] / total_female
+        p_female_40_44 <- demographic_data$female_40_44[idn] / total_female
+        p_female_45_49 <- demographic_data$female_45_49[idn] / total_female
+        p_female_50_54 <- demographic_data$female_50_54[idn] / total_female
+        p_female_55_59 <- demographic_data$female_55_59[idn] / total_female
+        p_female_60_64 <- demographic_data$female_60_64[idn] / total_female
+        p_female_65_69 <- demographic_data$female_65_69[idn] / total_female
+        p_female_70_74 <- demographic_data$female_70_74[idn] / total_female
+        p_female_75_79 <- demographic_data$female_75_79[idn] / total_female
+        p_female_80 <- demographic_data$female_80[idn] / total_female
+
+        replace_unk_age <- sample(sort(unique(covid_data$age_group)[-length(unique(covid_data$age_group))]), 1,
+                                  prob=c(p_female_0_4,p_female_10_14,p_female_15_19,p_female_20_24,p_female_25_29,p_female_30_34,
+                                         p_female_35_39,p_female_40_44,p_female_45_49,p_female_5_9,p_female_50_54,p_female_55_59,
+                                         p_female_60_64,p_female_65_69,p_female_70_74,p_female_75_79,p_female_80))
+        
+        covid_data$age_group[i] <- replace_unk_age
+      }
+      if(covid_data$sex_lst[i] == "Male"){
+        total_male <- demographic_data$male_population[idn]
+        
+        p_male_0_4 <- demographic_data$male_0_4[idn] / total_male
+        p_male_5_9 <- demographic_data$male_5_9[idn] / total_male
+        p_male_10_14 <- demographic_data$male_10_14[idn] / total_male
+        p_male_15_19 <- demographic_data$male_15_19[idn] / total_male
+        p_male_20_24 <- demographic_data$male_20_24[idn] / total_male
+        p_male_25_29 <- demographic_data$male_25_29[idn] / total_male
+        p_male_30_34 <- demographic_data$male_30_34[idn] / total_male
+        p_male_35_39 <- demographic_data$male_35_39[idn] / total_male
+        p_male_40_44 <- demographic_data$male_40_44[idn] / total_male
+        p_male_45_49 <- demographic_data$male_45_49[idn] / total_male
+        p_male_50_54 <- demographic_data$male_50_54[idn] / total_male
+        p_male_55_59 <- demographic_data$male_55_59[idn] / total_male
+        p_male_60_64 <- demographic_data$male_60_64[idn] / total_male
+        p_male_65_69 <- demographic_data$male_65_69[idn] / total_male
+        p_male_70_74 <- demographic_data$male_70_74[idn] / total_male
+        p_male_75_79 <- demographic_data$male_75_79[idn] / total_male
+        p_male_80 <- demographic_data$male_80[idn] / total_male
+
+        replace_unk_age <- sample(sort(unique(covid_data$age_group)[-length(unique(covid_data$age_group))]), 1,
+                                  prob=c(p_male_0_4,p_male_10_14,p_male_15_19,p_male_20_24,p_male_25_29,p_male_30_34,
+                                         p_male_35_39,p_male_40_44,p_male_45_49,p_male_5_9,p_male_50_54,p_male_55_59,
+                                         p_male_60_64,p_male_65_69,p_male_70_74,p_male_75_79,p_male_80))
+        
+        covid_data$age_group[i] <- replace_unk_age
+      }
+    }
+  }
+}  
+
+# We have in total 42535 cases
+```
+
+
+### __*3. Mapping the data.*__
+
+The code below shows how to compute the neighbors of several municipalities/communities in the map of Cyprus, using a neighborhood definition based on counties with common boundaries. The map of Cyprus counties is obtained from the shapefile as follows.
+
+```{r}
+library(SpatialEpi)
+map <- cyprus_shp
+plot(map)
+```
+```{r}
+class(map)
+```
+
+This function returns a neighbors list nb based on counties with contiguous boundaries. Each element of the list nb represents one county and contains the indices of its neighbors.
+```{r}
+library(spdep)
+nb <- poly2nb(map)
+head(nb,10)
+```
+
+
+Districts plot: creating a plot which maps the six different cities of Cyprus with polygons structure.
+
+```{r}
+# Creating a plot which maps the six different cities of Cyprus with polygons structure.
+
+districts_plot <- cyprus_shp %>% tm_shape() + 
+                    tm_fill("DIST_CODE",
+                            colors = "DIST_CODE",
+                            title = "Districts",
+                            labels = c("Lefkosia","Keryneia","Ammochostos","Larnaka","Lemesos","Pafos")) +
+                        tm_layout(title = "Map of Cyprus splitted by district") +
+                        tm_borders(alpha=.4) + tm_compass(position = c("left","top")) 
+
+districts_plot
+```
+
+```{r}
+districts <- c("Lefkosia","Keryneia","Ammochostos","Larnaka","Lemesos","Pafos")
+
+districts_plot_splitted <- cyprus_shp %>% tm_shape() + 
+                            tm_fill("DIST_CODE",
+                                    colors = "DIST_CODE",
+                                    title = "Districts",
+                                    labels = c("Lefkosia","Keryneia","Ammochostos","Larnaka","Lemesos","Pafos"),
+                                    legend.show = FALSE) +
+                              tm_facets("DIST_CODE") + 
+                               tm_borders(alpha=.4) + tm_layout(panel.labels = districts)
+
+districts_plot_splitted
+```
+
+
+
+### __*4. Creating the main dataset.*__
+
+```{r,message=FALSE}
+dates <- seq(as.Date("2020-03-09"),as.Date("2021-03-28"),by=1)
+names <- sort(unique(covid_data$municipality_town_lst)) # 325
+dates_ordered <- sort(unique(dates)) # 385
+
+df <- data.frame(rep(names, each = length(dates_ordered)),
+                 rep(dates, length(names))) 
+colnames(df) <- c("municipality_town_lst","lab_result_date")
+```
+
+```{r, message=FALSE}
+covid_cases <- covid_data %>% group_by(municipality_town_lst,lab_result_date) %>% summarize(cases = n())
+covid_cases <- left_join(df, covid_cases, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_female <- covid_data %>% filter(sex_lst == "Female") %>% group_by(municipality_town_lst,lab_result_date) %>% summarize(female = n()) 
+covid_cases_female <- left_join(df, covid_cases_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_male <- covid_data %>% filter(sex_lst == "Male") %>% group_by(municipality_town_lst,lab_result_date) %>% summarize(male = n())
+covid_cases_male <- left_join(df, covid_cases_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+
+covid_cases_0_4_female <- covid_data %>%
+                            filter(age_group == "0-4" & sex_lst == "Female") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(female_0_4 = n())
+covid_cases_0_4_female  <- left_join(df, covid_cases_0_4_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) 
+
+covid_cases_0_4_male <- covid_data %>%
+                            filter(age_group == "0-4" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_0_4 = n()) 
+covid_cases_0_4_male  <- left_join(df, covid_cases_0_4_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+
+covid_cases_5_9_female <- covid_data %>%
+                            filter(age_group == "5-9" & sex_lst == "Female") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(female_5_9 = n()) 
+covid_cases_5_9_female  <- left_join(df, covid_cases_5_9_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) 
+covid_cases_5_9_male <- covid_data %>%
+                          filter(age_group == "5-9" & sex_lst == "Male") %>%
+                            group_by(municipality_town_lst,lab_result_date) %>%
+                              summarize(male_5_9 = n()) 
+covid_cases_5_9_male  <- left_join(df, covid_cases_5_9_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) 
+
+
+
+covid_cases_10_14_female <- covid_data %>%
+                              filter(age_group == "10-14" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_10_14 = n()) 
+covid_cases_10_14_female  <- left_join(df, covid_cases_10_14_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) 
+covid_cases_10_14_male <- covid_data %>%
+                            filter(age_group == "10-14" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_10_14 = n()) 
+covid_cases_10_14_male  <- left_join(df, covid_cases_10_14_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) 
+
+
+covid_cases_15_19_female <- covid_data %>%
+                              filter(age_group == "15-19" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_15_19 = n()) 
+covid_cases_15_19_female  <- left_join(df, covid_cases_15_19_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) 
+covid_cases_15_19_male <- covid_data %>%
+                            filter(age_group == "15-19" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_15_19 = n()) 
+covid_cases_15_19_male  <- left_join(df, covid_cases_15_19_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_20_24_female <- covid_data %>%
+                              filter(age_group == "20-24" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_20_24 = n()) 
+covid_cases_20_24_female  <- left_join(df, covid_cases_20_24_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_20_24_male <- covid_data %>%
+                            filter(age_group == "20-24" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_20_24 = n()) 
+covid_cases_20_24_male  <- left_join(df, covid_cases_20_24_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_25_29_female <- covid_data %>%
+                              filter(age_group == "25-29" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_25_29 = n()) 
+covid_cases_25_29_female  <- left_join(df, covid_cases_25_29_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_25_29_male <- covid_data %>%
+                            filter(age_group == "25-29" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_25_29 = n()) 
+covid_cases_25_29_male  <- left_join(df, covid_cases_25_29_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_30_34_female <- covid_data %>%
+                              filter(age_group == "30-34" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_30_34 = n()) 
+covid_cases_30_34_female  <- left_join(df, covid_cases_30_34_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_30_34_male <- covid_data %>%
+                            filter(age_group == "30-34" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_30_34 = n()) 
+covid_cases_30_34_male  <- left_join(df, covid_cases_30_34_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_35_39_female <- covid_data %>%
+                              filter(age_group == "35-39" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_35_39 = n()) 
+covid_cases_35_39_female  <- left_join(df, covid_cases_35_39_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_35_39_male <- covid_data %>%
+                            filter(age_group == "35-39" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_35_39 = n()) 
+covid_cases_35_39_male  <- left_join(df, covid_cases_35_39_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_40_44_female <- covid_data %>%
+                              filter(age_group == "40-44" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_40_44 = n()) 
+covid_cases_40_44_female  <- left_join(df, covid_cases_40_44_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_40_44_male <- covid_data %>%
+                            filter(age_group == "40-44" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_40_44 = n()) 
+covid_cases_40_44_male  <- left_join(df, covid_cases_40_44_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_45_49_female <- covid_data %>%
+                              filter(age_group == "45-49" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_45_49 = n()) 
+covid_cases_45_49_female  <- left_join(df, covid_cases_45_49_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_45_49_male <- covid_data %>%
+                            filter(age_group == "45-49" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_45_49 = n()) 
+covid_cases_45_49_male  <- left_join(df, covid_cases_45_49_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_50_54_female <- covid_data %>%
+                              filter(age_group == "50-54" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_50_54 = n()) 
+covid_cases_50_54_female  <- left_join(df, covid_cases_50_54_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_50_54_male <- covid_data %>%
+                            filter(age_group == "50-54" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_50_54 = n()) 
+covid_cases_50_54_male  <- left_join(df, covid_cases_50_54_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_55_59_female <- covid_data %>%
+                              filter(age_group == "55-59" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_55_59 = n()) 
+covid_cases_55_59_female  <- left_join(df, covid_cases_55_59_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_55_59_male <- covid_data %>%
+                            filter(age_group == "55-59" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_55_59 = n()) 
+covid_cases_55_59_male  <- left_join(df, covid_cases_55_59_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_60_64_female <- covid_data %>%
+                              filter(age_group == "60-64" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_60_64 = n()) 
+covid_cases_60_64_female  <- left_join(df, covid_cases_60_64_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_60_64_male <- covid_data %>%
+                            filter(age_group == "60-64" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_60_64 = n()) 
+covid_cases_60_64_male  <- left_join(df, covid_cases_60_64_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_65_69_female <- covid_data %>%
+                              filter(age_group == "65-69" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_65_69 = n()) 
+covid_cases_65_69_female  <- left_join(df, covid_cases_65_69_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_65_69_male <- covid_data %>%
+                            filter(age_group == "65-69" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_65_69 = n()) 
+covid_cases_65_69_male  <- left_join(df, covid_cases_65_69_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_70_74_female <- covid_data %>%
+                              filter(age_group == "70-74" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_70_74 = n()) 
+covid_cases_70_74_female  <- left_join(df, covid_cases_70_74_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_70_74_male <- covid_data %>%
+                            filter(age_group == "70-74" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_70_74 = n()) 
+covid_cases_70_74_male  <- left_join(df, covid_cases_70_74_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_75_79_female <- covid_data %>%
+                              filter(age_group == "75-79" & sex_lst == "Female") %>%
+                                group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_75_79 = n()) 
+covid_cases_75_79_female  <- left_join(df, covid_cases_75_79_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_75_79_male <- covid_data %>%
+                            filter(age_group == "75-79" & sex_lst == "Male") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(male_75_79 = n()) 
+covid_cases_75_79_male  <- left_join(df, covid_cases_75_79_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_cases_80_female <- covid_data %>%
+                            filter(age_group == "80" & sex_lst == "Female") %>%
+                              group_by(municipality_town_lst,lab_result_date) %>%
+                                  summarize(female_80 = n()) 
+covid_cases_80_female  <- left_join(df, covid_cases_80_female, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+covid_cases_80_male <- covid_data %>%
+                          filter(age_group == "80" & sex_lst == "Male") %>%
+                            group_by(municipality_town_lst,lab_result_date) %>%
+                                summarize(male_80 = n()) 
+covid_cases_80_male  <- left_join(df, covid_cases_80_male, by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+covid_data1 <- left_join(covid_cases, covid_cases_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst","lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_0_4_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_0_4_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_5_9_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_5_9_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_10_14_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_10_14_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_15_19_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_15_19_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_20_24_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_20_24_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_25_29_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_25_29_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_30_34_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_30_34_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_35_39_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_35_39_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_40_44_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_40_44_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_45_49_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_45_49_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_50_54_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_50_54_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_55_59_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_55_59_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_60_64_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_60_64_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_65_69_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_65_69_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_70_74_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_70_74_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_75_79_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_75_79_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_80_female,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date")) %>%
+               left_join(covid_cases_80_male,
+                         by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date"))
+
+
+library(imputeTS)
+covid_data1 <- na_replace(covid_data1, 0)
+```
+
+### __*4. Plotting the neighbours.*__
+
+```{r}
+# queen neighbours
+
+nb_info <- poly2nb(cyprus_shp)
+nb_info
+
+plot(cyprus_shp, border = 'lightgrey')
+plot(nb_info, coords = coordinates(cyprus_shp), add = TRUE, col = "red")
+title("Cyprus map-Queen neighbours")
+box(lty = "solid")
+```
+
+```{r}
+nb_info_rook <- poly2nb(cyprus_shp, queen = FALSE)
+nb_info_rook
+
+plot(cyprus_shp, border = 'lightgrey')
+plot(nb_info_rook, coords = coordinates(cyprus_shp), add = TRUE, col = "blue")
+title("Cyprus map-Rook neighbours")
+box(lty = "solid")
+```
+```{r}
+plot(cyprus_shp, border = 'lightgrey')
+plot(nb_info, coordinates(cyprus_shp), add=TRUE, col='red')
+plot(nb_info_rook, coordinates(cyprus_shp), add=TRUE, col='blue')
+title("Cyprus map-Queen vs Rook neighbours")
+legend(x = "bottomright", legend = c("Queen", "Rook"), lty = c(1, 1), col = c("red", "blue"), lwd = 2) 
+box(lty = "solid")
+```
+### __*5. Plotting demographic/census plots.*__
+
+```{r}
+demographic_data_ren <- demographic_data %>% rename(municipality_town_lst = "name")
+population_vill <- demographic_data_ren$total_population
+
+cyprus_shp_dem <- cyprus_shp
+cyprus_shp_dem@data <- left_join(cyprus_shp@data,demographic_data_ren,by = "municipality_town_lst")
+```
+
+```{r, message=FALSE}
+map_pop <- cyprus_shp_dem %>% 
+            tm_shape() + 
+              tm_fill("total_population",
+                      palette = "Reds", 
+                      style = "quantile", 
+                      title = "Population") +
+                    tm_borders(alpha=.4) +
+                      tm_layout(title = "Population per municipality/community") +
+                       tm_scale_bar(position = c("left", "bottom"), width = 0.15) +
+                                tm_compass(position = c("left", "top"), size = 0.8) 
+
+map_pop
+```
+
+
+
+```{r,message=FALSE}
+map_pop_male <- cyprus_shp_dem %>% 
+                  tm_shape() + 
+                    tm_fill("male_population",
+                            palette = "Reds", 
+                            breaks = c(0,30,80,200,300,400,500,600,800,1000,3000,5000,10000,20000,50000,170000),
+                            title = "Population Male") +
+                          tm_borders(alpha=.4) + tm_scale_bar(position = c("left", "bottom"), width = 0.15) +
+                                tm_compass(position = c("left", "top"), size = 0.8) 
+
+map_pop_female <- cyprus_shp_dem %>% 
+                    tm_shape() + 
+                      tm_fill("female_population",
+                              breaks = c(0,30,80,200,300,400,500,600,800,1000,3000,5000,10000,20000,50000,170000),
+                              palette = "Reds", 
+                              title = "Population Female") +
+                            tm_borders(alpha=.4) + tm_scale_bar(position = c("left", "bottom"), width = 0.15) +
+                                tm_compass(position = c("left", "top"), size = 0.8) 
+
+tmap_arrange(map_pop_male,map_pop_female)
+```
+```{r,message=FALSE}
+map_pop_emp <- cyprus_shp_dem %>% 
+                  tm_shape() + 
+                    tm_fill("total_employed",
+                            breaks = c(0,1,10,100,1000,10000,100000,200000),
+                            palette = "Reds",
+                            title = "Number of employed people") +
+                        tm_borders(alpha=.4) + tm_borders(alpha=.4) + tm_scale_bar(position = c("left", "bottom"), width = 0.15) +
+                            tm_compass(position = c("left", "top"), size = 0.8) 
+
+map_pop_unemp <- cyprus_shp_dem %>% 
+                    tm_shape() + 
+                      tm_fill("total_unemployed",
+                              breaks = c(0,1,10,100,1000,10000,100000,200000),
+                              palette = "Reds",
+                              title = "Number of unemployed people") +
+                          tm_borders(alpha=.4) + tm_borders(alpha=.4) + tm_scale_bar(position = c("left", "bottom"), width = 0.15) +
+                              tm_compass(position = c("left", "top"), size = 0.8) 
+
+tmap_arrange(map_pop_emp,map_pop_unemp)
+```
+
+```{r,message=FALSE}
+map_pop_0_19 <- cyprus_shp_dem %>% 
+                  tm_shape() + 
+                    tm_fill("children_total",
+                            breaks = c(0,10,100,1000,10000,20000,25000,50000),
+                            palette = "Reds",
+                            title = "Number of children (0-19)",
+                            legend.show = FALSE) +
+                          tm_borders(alpha=.4) + tm_layout(title = "Number of children (0-19)") +
+                            tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                              tm_compass(position = c("left", "top"), size = 0.8) + tm_layout(title.size = 1)
+
+map_pop_20_39 <- cyprus_shp_dem %>% 
+                    tm_shape() + 
+                      tm_fill("youth_total",
+                              breaks = c(0,10,100,1000,10000,20000,25000,50000),
+                              palette = "Reds",
+                              title = "Number of youth (20-39)",
+                              legend.show = FALSE) +
+                            tm_borders(alpha=.4) + tm_layout(title = "Number of youth (20-39)") + 
+                              tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                tm_compass(position = c("left", "top"), size = 0.8) + tm_layout(title.size = 1)
+
+map_pop_40_59 <- cyprus_shp_dem %>% 
+                    tm_shape() + 
+                      tm_fill("middle_ages_total",
+                              breaks = c(0,10,100,1000,10000,20000,25000,50000),
+                              palette = "Reds",
+                              title = "Number of middle ages (40-59)",
+                              legend.show = FALSE) +
+                            tm_borders(alpha=.4) + tm_layout(title = "Number of middle ages (40-59)") +
+                              tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                tm_compass(position = c("left", "top"), size = 0.8) + tm_layout(title.size = 1)
+
+map_pop_60_80 <- cyprus_shp_dem %>% 
+                    tm_shape() + 
+                      tm_fill("seniors_total",
+                              breaks = c(0,10,100,1000,10000,20000,25000,50000),
+                              palette = "Reds",
+                              title = "Number of seniors (60-80+)",
+                              legend.show = FALSE) +
+                            tm_borders(alpha=.4) + tm_layout(title = "Number of seniors (60-80+)") +
+                              tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                tm_compass(position = c("left", "top"), size = 0.8) + tm_layout(title.size = 1)
+
+tmap_arrange(map_pop_0_19,map_pop_20_39,map_pop_40_59,map_pop_60_80, ncol = 2, nrow = 2)
+```
+
+### __*6. Creating the dataframe with all the information.*__
+
+```{r}
+names_ts_cd <- unique(covid_data1$municipality_town_lst)
+
+c <- covid_data1
+
+for (i in 1:nrow(cyprus_shp@data)) {
+  if (!(cyprus_shp@data$municipality_town_lst[i] %in% names_ts_cd)) {
+    df <- data.frame(cyprus_shp@data$municipality_town_lst[i], dates, "99999","99999","99999","99999","99999","99999",
+                     "99999","99999","99999","99999","99999","99999","99999","99999","99999","99999","99999","99999",
+                     "99999","99999","99999","99999","99999","99999","99999","99999","99999","99999","99999","99999",
+                     "99999","99999","99999","99999","99999","99999","99999")
+    colnames(df) <- names(covid_data1)
+    c <- c %>% rbind(df)
+  }
+} 
+
+c <- c %>% mutate(lab_result_date = as.Date(lab_result_date)) %>%  mutate_at(c(3:39), as.numeric)
+c[is.na(c)] <- 0
+
+ts_covid_data <- c %>%
+                  group_by(municipality_town_lst,lab_result_date)%>%
+                      mutate(month = month(lab_result_date),
+                             year = year(lab_result_date))
+
+
+ts_covid_data[ts_covid_data == 99999] <- NA
+ts_covid_data$csum_cases <- ave(ts_covid_data$cases, ts_covid_data$municipality_town_lst, FUN=cumsum)
+
+pop <- demographic_data %>% dplyr::select("name", "total_population") %>% rename(municipality_town_lst = "name")
+
+# join dfs
+ts_covid_data <- dplyr::left_join(ts_covid_data, pop, by = "municipality_town_lst")
+ts_covid_data$cases_rate <- (ts_covid_data$cases / ts_covid_data$total_population) * 1000
+
+ts_covid_data
+```
+
+
+### __*7. Exploratory Analysis.*__
+
+```{r}
+sd <- apply(ts_covid_data[,-c(1,2)], 2, sd,   na.rm = T)
+min <- apply(ts_covid_data[,-c(1,2)], 2, min,  na.rm = T)
+max <- apply(ts_covid_data[,-c(1,2)], 2, max,  na.rm = T)
+mean <- apply(ts_covid_data[,-c(1,2)], 2, mean, na.rm = T)
+
+data.frame(sd, min, max, mean) %>% 
+  kable(digits = 3,
+        caption = "Covid data summary statistics",
+        align="c") %>%  
+          kable_classic(full_width = F, html_font = "Cambria")
+```
+
+
+```{r,message=FALSE}
+library(zoo)
+library(hrbrthemes)
+
+ts_plot_month <- covid_data %>%
+                  mutate(lab_result_date = as.Date(lab_result_date, "%d/%m/%Y"),
+                         year = year(lab_result_date),
+                         month = month(lab_result_date),
+                         month_year = as.Date(as.yearmon(paste(year,month,sep = "-")))) %>%
+                      group_by(month_year) %>%
+                        summarise(monthly_cases = n()) %>%
+                          ggplot(aes(x=month_year, y=monthly_cases)) +
+                            geom_line(color="red") + geom_smooth(se = FALSE) + theme_ipsum() +
+                              labs(x = "Month-Year", y = "Monthly cases", title = "Number of Cases per Month")
+
+ts_plot_month
+```
+
+```{r}
+ts_plot_day <- ts_covid_data %>%
+                    group_by(lab_result_date) %>%
+                      summarise(daily_cases = sum(cases,na.rm=TRUE)) %>%
+                        ggplot(aes(x=lab_result_date, y=daily_cases)) +
+                          geom_line(color="red") + theme_ipsum() + geom_smooth() +
+                              labs(x = "Date", y = "Daily cases", title = "Number of Cases per Day")
+
+ts_plot_day 
+```
+```{r}
+ts_plot_day_mean <- ts_covid_data %>%
+                      group_by(lab_result_date) %>%
+                        summarise(daily_mean_cases = mean(cases,na.rm=TRUE)) %>%
+                          ggplot(aes(x=lab_result_date, y=daily_mean_cases)) +
+                            geom_line(color="red") + geom_smooth() + theme_ipsum() +
+                                labs(x = "Date", y = "Daily mean cases", title = "Number of Average number of Cases per Day")
+
+ts_plot_day_mean
+```
+```{r}
+ts_plot_day_cumulative <- ts_covid_data %>%
+                           group_by(lab_result_date) %>%
+                            summarise(daily_cum_cases = sum(csum_cases,na.rm=TRUE)) %>%
+                              ggplot(aes(x=lab_result_date, y=daily_cum_cases)) +
+                                geom_line(color="red") + geom_smooth() +
+                                  theme_ipsum() +
+                                    labs(x = "Date", y = "Daily cumulative cases", title = "Number of  cumulative Cases per Day") 
+
+ts_plot_day_cumulative
+```
+
+
+
+
+```{r}
+cy_covid_open_data <- read_csv(file.choose()) %>% janitor::clean_names()
+cy_covid_open_data <- cy_covid_open_data %>%
+                        rename(lab_result_date = "date") %>% 
+                          mutate(lab_result_date = as.Date(lab_result_date, "%d/%m/%Y"),
+                                 month = month(lab_result_date),
+                                 year = year(lab_result_date)) %>%
+                            filter(lab_result_date <= as.Date("2021-03-29"))
+
+cy_covid_open_data <- replace(cy_covid_open_data, is.na(cy_covid_open_data), 0)
+
+ts_plot_tests_day <- cy_covid_open_data %>%
+                      ggplot(aes(lab_result_date,total_daily_tests_performed)) +
+                        geom_line(col = "green") +
+                          geom_point(fill = "green", size = 0.5, col = "green") + geom_smooth() +
+                          theme_ipsum() +
+                            labs(x = "Date", y = "Daily tests", title = "Number of Tests per Day") 
+
+ts_plot_tests_day
+```
+
+```{r}
+ts_plot_hospitilizations_day <- cy_covid_open_data %>%
+                                  ggplot(aes(x=lab_result_date,y=hospitalised_cases)) +
+                                    geom_line() + geom_smooth() + 
+                                      labs(x="Date",y="Number of hospitalizations",title="Hospitalized cases per Day") +
+                                         theme_ipsum()
+
+ts_plot_hospitilizations_day
+```
+
+```{r}
+top_5 <- ts_covid_data %>% 
+          group_by(municipality_town_lst) %>%
+            summarise(daily_cases = sum(cases)) %>%
+              arrange(desc(daily_cases)) %>%
+                slice(1:5)
+
+top_5
+```
+
+Reading the shapefile using sp package instead.
+```{r}
+cyprus_shp_sf <- read_sf(file.choose(), options = "ENCODING=UTF8") %>% rename(municipality_town_lst = "VIL_NM_E") 
+head(cyprus_shp_sf)
+```
+
+```{r}
+cyprus_shp_sf$municipality_town_lst[cyprus_shp_sf$municipality_town_lst=="AGIA VARVARA"& cyprus_shp_sf$DIST_CODE==1] <- "AGIA VARVARA LEFKOSIA" 
+cyprus_shp_sf$municipality_town_lst[cyprus_shp_sf$municipality_town_lst=="AGIA VARVARA"& cyprus_shp_sf$DIST_CODE==6] <- "AGIA VARVARA PAFOS"
+```
+
+
+
+List of the reponse measures implemented in Cyprus during the study period.
+```{r}
+cyprus_measures <- read_csv(file.choose())
+cyprus_measures <- cyprus_measures %>% filter(date_start < as.Date("2021-03-30"))
+cyprus_measures %>%
+  dplyr::select(-1) %>%
+    arrange(date_start,date_end) %>%
+    kable(caption = "Social distancing measure and their in force period", col.names = c("Response measure", "Start date", "End date")) %>%
+      kable_classic()
+```
+
+
+Creating a timeline visualizing the response measures and their duration.
+
+```{r}
+library("ganttrify")
+import_roboto_condensed()
+
+cyprus_measures_gantt_chart <- cyprus_measures %>% mutate(month = months(date_start)) %>% dplyr::select(5,2,3,4)
+colnames(cyprus_measures_gantt_chart) <- c("wp", "activity", "start_date", "end_date")
+cyprus_measures_gantt_chart <- cyprus_measures_gantt_chart %>% mutate_if(is.numeric,as.character)
+cyprus_measures_gantt_chart <- cyprus_measures_gantt_chart %>% mutate(start_date = as.character(start_date, "%Y-%m-%d"),
+                                                                      end_date = as.character(end_date, "%Y-%m-%d"))
+cyprus_measures_gantt_chart <- cyprus_measures_gantt_chart %>% drop_na()
+
+timeline <- ganttrify(project = cyprus_measures_gantt_chart,
+          by_date = TRUE,
+          exact_date = TRUE,
+          size_text_relative = 0.8,
+          axis_text_align = "centre",
+          month_number_label = FALSE,
+          show_vertical_lines = FALSE,
+          font_family = "Roboto Condensed",
+          alpha_activity = 0.9,
+          size_wp = 2,
+          size_activity = 2,
+          colour_stripe = "lightgrey",
+          colour_palette = "#9ACD32",
+          hide_wp = TRUE
+          ) +
+ ggplot2::labs(title = "Covid-19 Response Measures in Cyprus",
+               subtitle = "Study period 09/03/2020-28/03/2021",
+               caption = "Source: ECDC, https://www.ecdc.europa.eu/en/publications-data/download-data-response-measures-covid-19") 
+
+timeline
+```
+
+
+
+
+A new dataframe is created which contains only the dates with one week interval.
+```{r}
+days_7 <- seq(as.Date("2020-03-09"),as.Date("2021-03-29"),by=7)
+days_7 <- c(days_7[-56],as.Date("2021-03-28"))
+
+ts_covid_data_7_days <- ts_covid_data %>%
+                          filter(lab_result_date %in% days_7) %>%
+                            as.data.frame()
+```
+
+
+A new dataframe is created which contains only the dates with two weeks interval.
+```{r}
+days_14 <- seq(as.Date("2020-03-09"),as.Date("2021-03-29"),by=13)
+
+ts_covid_data_14_days <- ts_covid_data %>%
+                          filter(lab_result_date %in% days_14) %>%
+                            as.data.frame()
+      
+polygon_data_14_days <- left_join(cyprus_shp_sf, ts_covid_data_14_days) %>%
+                          as.data.frame()
+```
+
+```{r}
+x <- sort(unique(ts_covid_data_7_days$municipality_town_lst)) == sort(unique(cyprus_shp_sf$municipality_town_lst))
+indices <- which(x == "FALSE")
+
+names_sorted1 <- sort(unique(cyprus_shp_sf$municipality_town_lst))
+names_sorted2 <- sort(unique(ts_covid_data_7_days$municipality_town_lst))
+
+for (i in indices){
+  names_sorted1[i] <- names_sorted2[i]
+}
+
+cyprus_shp_sf <- cyprus_shp_sf %>% arrange(municipality_town_lst)
+cyprus_shp_sf$municipality_town_lst <- names_sorted1
+```
+
+```{r}
+ts_covid_data_7_days
+ts_covid_data_7_days$week <- rep(c(seq(1,55,1),as.vector(55)), 615)
+ts_covid_data_7_days$cases_week <- as.integer(0)
+
+villages <- unique(c())
+
+for (i in 1:nrow(ts_covid_data_7_days)) {
+  if (!(ts_covid_data_7_days$municipality_town_lst[i] %in% villages)) {
+    villages <- c(villages, ts_covid_data_7_days$municipality_town_lst[i])
+    ts_covid_data_7_days$cases_week[i] <- ts_covid_data_7_days$csum_cases[i]
+  }
+  else {
+    ts_covid_data_7_days$cases_week[i] <- ts_covid_data_7_days$csum_cases[i] - ts_covid_data_7_days$csum_cases[i-1]
+  }
+}
+
+ts_covid_data_7_days$cases_week_rate <- (ts_covid_data_7_days$cases_week / ts_covid_data_7_days$total_population) * 1000
+```
+
+```{r}
+polygon_data_7_days <- left_join(cyprus_shp_sf, ts_covid_data_7_days,by="municipality_town_lst") %>%
+                        as.data.frame()
+```
+
+
+Below we calculate the global Moran's I statistic.
+```{r}
+global_mi <- function(date) {
+  nb_info <- poly2nb(cyprus_shp)
+
+  wm <- nb2mat(nb_info, style='B') # weights binary matrix
+  rwm <- mat2listw(wm, style='W') # row-standardized weights matrix
+  mat <- listw2mat(rwm) 
+  
+  gm_ts_covid_data_7_days <- ts_covid_data_7_days
+  gm_ts_covid_data_7_days$cases_week[is.na(gm_ts_covid_data_7_days$cases_week)] <- 0
+  gm_ts_covid_data_7_days <- gm_ts_covid_data_7_days %>% filter(lab_result_date %in% date)
+  globalMoran <- moran.test(gm_ts_covid_data_7_days$cases_week, rwm, randomisation = FALSE)
+  
+  return(globalMoran)
+}
+```
+
+```{r}
+moran_statistics <- c()
+moran_dates <- days_7
+moran_zscores <- c()
+
+for (date in days_7) {
+  moran_test <- global_mi(date)
+  moran_statistics <- c(moran_statistics, moran_test[["estimate"]][["Moran I statistic"]])
+  z_score <-  (moran_test[["estimate"]][["Moran I statistic"]] - moran_test[["estimate"]][["Expectation"]])/sqrt(moran_test[["estimate"]][["Variance"]])
+  moran_zscores <- c(moran_zscores,z_score)
+}
+```
+
+```{r}
+library(cowplot)
+plt1 <- ggplot(data.frame(moran_statistics,moran_dates,moran_zscores), aes(x=moran_dates)) +
+          geom_bar(aes(y = moran_statistics) ,stat = "identity", fill = "steelblue", width = 4) +
+              scale_x_continuous(labels = as.character(moran_dates), breaks = moran_dates) +
+                theme_cowplot() + labs(x = "Date", y = "Moran's I", title = "Weekly case incidence Moran's I vs Z-scores") +
+                  theme(plot.title = element_text(size=10)) + theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 7))
+
+plt2 <- ggplot(data.frame(moran_statistics,moran_dates,moran_zscores), aes(x=moran_dates)) +
+          geom_point(aes(y = moran_zscores), color = "orange", size = 2) + 
+            geom_line(aes(y = moran_zscores), col = "orange", lwd = 0.5) +
+              scale_y_continuous(position = "right") +
+                theme_cowplot() + theme(axis.title.x=element_blank(), axis.text.x=element_blank()) + labs(x = "Date", y = "Z-score")
+
+aligned_plots <- cowplot::align_plots(plt1, plt2, align="hv", axis="tblr")         # align the two plots and save them as list
+aligned_plotted <- ggdraw(aligned_plots[[1]]) + draw_plot(aligned_plots[[2]])  # overlay them and save the visual plot
+aligned_plotted 
+```
+
+The below function extracts LISA map for each date.
+```{r}
+mi_plot <- function(date){
+    nb_info <- poly2nb(cyprus_shp)
+
+    df_mi <- polygon_data_7_days %>%
+                filter(lab_result_date == as.Date(date)) %>%
+                  dplyr::select(-c(1,3,4,5,6)) %>%
+                    mutate(cases_week = ifelse(is.na(cases_week),0,cases_week))
+    
+    mi_data <- cyprus_shp
+    mi_data@data <- left_join(mi_data@data,df_mi)
+    
+    local <- localmoran(x = mi_data$cases_week, listw = nb2listw(nb_info, style = "W"))
+    
+    quadrant <- vector(mode="numeric",length=nrow(local))
+    
+    # centers the variable of interest around its mean
+    m.cases <- (mi_data$cases_week - mean(mi_data$cases_week, na.rm = TRUE)) / sd(mi_data$cases_week, na.rm = TRUE)    
+    
+    # centers the local Moran's around the mean
+    m.local <- local[,1] - mean(local[,1], na.rm = TRUE) / sd(local[,1], na.rm = TRUE)   
+    
+    # significance threshold
+    signif <- 0.1
+    
+    # builds a data quadrant
+    quadrant[m.cases >0 & m.local>0] <- 4  
+    quadrant[m.cases <0 & m.local<0] <- 1      
+    quadrant[m.cases <0 & m.local>0] <- 2
+    quadrant[m.cases >0 & m.local<0] <- 3
+    quadrant[local[,5]>signif] <- 0   
+    
+    # plot in r
+    brks <- c(0,1,2,3,4)
+    colors <- c("white","blue",rgb(0,0,1,alpha=0.4),rgb(1,0,0,alpha=0.4),"red")
+
+    plt <- plot(mi_data, border="lightgray", col=colors[findInterval(quadrant,brks,all.inside=FALSE)])
+    title(main = paste("LISA",as.character(date)), adj=0)
+    box()
+    legend("bottomright", legend = c("insignificant","low-low","low-high","high-low","high-high"),fill=colors,bty="n", title = "LISA Cluster Map") 
+}
+```
+
+```{r}
+mi_plot_regions <- function(date){
+    nb_info <- poly2nb(cyprus_shp)
+
+    df_mi <- polygon_data_7_days %>%
+                filter(lab_result_date == as.Date(date)) %>%
+                  dplyr::select(-c(1,3,4,5,6)) %>%
+                    mutate(cases_week = ifelse(is.na(cases_week),0,cases_week))
+    
+    mi_data <- cyprus_shp
+    mi_data@data <- left_join(mi_data@data,df_mi)
+    
+    local <- localmoran(x = mi_data$cases_week, listw = nb2listw(nb_info, style = "W"))
+  
+    return(data.frame(mi_data$municipality_town_lst,local))
+}
+```
+
+
+```{r}
+local_mi <- function(date,polygon_data_7_days,cyprus_shp){
+  library(RColorBrewer)
+
+  nb_info <- poly2nb(cyprus_shp)
+
+  df_mi <- polygon_data_7_days %>%
+              filter(lab_result_date == as.Date(date)) %>%
+                dplyr::select(-c(1,3,4,5,6)) %>%
+                  mutate(cases_week = ifelse(is.na(cases_week),0,cases_week))
+    
+  mi_data <- cyprus_shp
+  mi_data@data <- left_join(mi_data@data,df_mi)
+  mi_data$lI <- localmoran(x = mi_data$cases_week, listw = nb2listw(nb_info, style = "W"))[,1]
+  
+  tm_shape(mi_data,unit='miles') + 
+    tm_polygons(col='lI',
+                title=paste("Local Morans I statistic",as.character(date)),
+                legend.format=list(flag="+"),
+                border.alpha = 0.4,
+                border.col = "darkgrey",
+                palette = "-YlGnBu") +
+      tm_scale_bar(position = c("right", "bottom"),
+                   width = 0.15) +
+        tm_layout(legend.position = c("left","top"),
+                  legend.text.size=1)
+}
+```
+
+```{r}
+local_mi_pvalue <- function(date,polygon_data_7_days,cyprus_shp){
+      nb_info <- poly2nb(cyprus_shp)
+    
+      df_mi <- polygon_data_7_days %>%
+                  filter(lab_result_date == as.Date(date)) %>%
+                    dplyr::select(-c(1,3,4,5,6)) %>%
+                      mutate(cases_week = ifelse(is.na(cases_week),0,cases_week))
+        
+      mi_data <- cyprus_shp
+      mi_data@data <- left_join(mi_data@data,df_mi)
+      mi_data$pval <- localmoran(x = mi_data$cases_week, listw = nb2listw(nb_info, style = "W"))[,5]
+
+      # Draw the map
+      tm_shape(mi_data,unit='miles') + 
+        tm_polygons(col='pval',
+                    title=paste("p-value",as.character(date)),
+                    breaks=c(0,0.01,0.05,0.10,1),
+                    border.col = "darkgrey",
+                    border.alpha = 0.4,
+                    palette = "-Greens") +
+           tm_scale_bar(width=0.15) + 
+             tm_layout(legend.position = c("left","top"),
+                       legend.text.size = 1)
+  }
+```
+
+```{r,message=FALSE}
+areas_clusters <- function(days_7){
+  names <- c()
+  for (i in days_7[1:12]) {
+    local <- mi_plot_regions(i)
+    colnames(local) <- c("municipality_town_lst", "I", "E", "Var", "Z", "p_value")
+    local <- local %>% filter(p_value < 0.1)
+    names <- c(names,local$municipality_town_lst)
+    }
+  return(unique(names))
+}
+
+names_clusters <- areas_clusters(days_7)
+kable(names_clusters) %>% 
+  kable_classic(full_width = FALSE)
+```
+
+```{r,message=FALSE}
+mi_plot(days_7[4]) # "2020-03-30"
+mi_plot(days_7[6]) # "2020-04-13" 
+mi_plot(days_7[8]) # "2020-04-27"
+mi_plot(days_7[8]) # "2020-04-27"
+mi_plot(days_7[10]) # "2020-05-11"
+mi_plot(days_7[12]) # "2020-05-25"
+mi_plot(days_7[14]) # "2020-06-08"
+mi_plot(days_7[16]) # "2020-06-22"
+mi_plot(days_7[18]) # "2020-07-06"
+mi_plot(days_7[20]) # "2020-07-20"
+mi_plot(days_7[22]) # "2020-08-03"
+mi_plot(days_7[24]) # "2020-08-17"
+mi_plot(days_7[26]) # "2020-08-31"
+mi_plot(days_7[28]) # "2020-09-14"
+mi_plot(days_7[30]) # "2020-09-28"
+mi_plot(days_7[32]) # "2020-10-12" 
+mi_plot(days_7[34]) # "2020-10-26"
+mi_plot(days_7[36]) # "2020-11-09"
+mi_plot(days_7[38]) # "2020-11-23"
+mi_plot(days_7[40]) # "2020-12-07"
+mi_plot(days_7[42]) # "2020-12-21"
+mi_plot(days_7[44]) # "2021-01-04"
+mi_plot(days_7[46]) # "2021-01-18"
+mi_plot(days_7[48]) # "2021-02-01"
+mi_plot(days_7[50]) # "2021-02-15"
+mi_plot(days_7[52]) # "2021-03-01"
+mi_plot(days_7[54]) # "2021-03-15"
+mi_plot(days_7[56]) # "2021-03-28"
+```
+
+Creating a plot with the cumulative number of Covid-19 cases per month during the study period.
+```{r, message=FALSE}
+date_end_month <- seq(as.Date("2020-04-01"),length=12,by="months")-1 %>% as.vector()
+date_end_month <- c(date_end_month,as.Date("2021-03-28"))
+
+ts_covid_data_month <- ts_covid_data %>%
+                          filter(lab_result_date %in% date_end_month) %>%
+                              as.data.frame()
+
+p1 <- left_join(cyprus_shp_sf, ts_covid_data_month) %>%
+        as.data.frame()
+```
+```{r,message=FALSE}
+library(Polychrome)
+col <- viridisLite::viridis(17)
+pal = createPalette(20,viridis(20))
+
+b <- c(seq(0,200,20),seq(500,2000,500),seq(2500,8500,1500))
+
+map_monthly1 <- p1 %>%
+                  filter(lab_result_date %in% date_end_month[1:6]) %>%
+                    st_as_sf() %>%
+                      tm_shape() +
+                        tm_fill(col = "csum_cases",
+                                breaks = b) +
+                          tm_polygons(border.col = "lightgrey",
+                                      border.alpha = 0.5) +
+                            tm_legend(legend.position = c("left", "bottom"), show = FALSE) +
+                              tm_facets(by=c("lab_result_date"), ncol = 3) +
+                                tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                  tm_compass(position = c("left", "top"), size = 1)
+
+map_monthly1
+```
+
+```{r,message=FALSE}
+map_monthly2 <- p1 %>%
+                  filter(lab_result_date %in% date_end_month[7:12]) %>%
+                    st_as_sf() %>%
+                      tm_shape() +
+                        tm_fill(col = "csum_cases",
+                                breaks = b) +
+                          tm_polygons(border.col = "lightgrey",
+                                      border.alpha = 0.5) +
+                            tm_legend(legend.position = c("left", "bottom"), show = FALSE) +
+                              tm_facets(by=c("lab_result_date"), ncol = 3) + 
+                                tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                  tm_compass(position = c("left", "top"), size = 1)
+
+map_monthly2
+```
+
+```{r,message=FALSE}
+map_monthly3 <- p1 %>%
+                  filter(lab_result_date == as.Date("2021-03-28")) %>%
+                    st_as_sf() %>%
+                      tm_shape() +
+                        tm_fill(col = "csum_cases",
+                                breaks = b) +
+                          tm_polygons(border.col = "lightgrey",
+                                      border.alpha = 0.5) +
+                            tm_legend(legend.position = c("left", "bottom"), show = FALSE) +
+                              tm_facets(by=c("lab_result_date"), ncol = 3, nrow = 3) +
+                                tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                  tm_compass(position = c("left", "top"), size = 1)
+
+map_monthly3
+```
+
+```{r, message=FALSE}
+map_monthly4 <- p1 %>%
+                  filter(lab_result_date %in% date_end_month[13]) %>%
+                    st_as_sf() %>%
+                      tm_shape() +
+                        tm_fill(col = "csum_cases",
+                                breaks = b) +
+                          tm_polygons(border.col = "lightgrey",
+                                      border.alpha = 0.5) +
+                            tm_legend(legend.position = c("left", "bottom"), legend.only = TRUE)
+
+map_monthly4
+```
+
+For the local lockdown in Lemesos and Pafos districts during November two plots are displayes, the one with the cases and the other with cases as a rate of population.
+```{r}
+local_lockdown <- ts_covid_data_7_days %>% filter(lab_result_date >= as.Date("2020-11-01") & lab_result_date <= as.Date("2020-12-01"))
+plocal <- left_join(local_lockdown,cyprus_shp_sf, ) %>%
+            as.data.frame()
+
+map_local_lockdown <- plocal %>%
+                        st_as_sf() %>%
+                          tm_shape() +
+                            tm_fill(col = "cases_week") +
+                              tm_polygons(border.col = "lightgrey",
+                                          border.alpha = 0.5) +
+                                tm_legend(legend.position = c("left", "bottom"), show = TRUE) +
+                                  tm_facets(by=c("lab_result_date")) + 
+                                    tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                      tm_compass(position = c("left", "top"), size = 1)
+
+map_local_lockdown_rate <- plocal %>%
+                            st_as_sf() %>%
+                              tm_shape() +
+                                tm_fill(col = "cases_week_rate") +
+                                  tm_polygons(border.col = "lightgrey",
+                                              border.alpha = 0.5) +
+                                    tm_legend(legend.position = c("left", "bottom"), show = TRUE) +
+                                      tm_facets(by=c("lab_result_date")) + 
+                                        tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                          tm_compass(position = c("left", "top"), size = 1) 
+
+map_local_lockdown
+```
+
+```{r}
+map_local_lockdown_rate
+```
+
+
+```{r}
+library(scales)
+
+total_cases1 <- ts_covid_data %>% group_by(municipality_town_lst) %>% summarize(total_cases = sum(cases, na.rm = TRUE)) %>% mutate(percentage_all_cases = percent((round(total_cases / 42535,3)))) %>% arrange(desc(total_cases)) %>% slice(1:10)
+
+total_cases1$population <- as.integer(0)
+for (i in 1:nrow(total_cases1)) {
+  idn <- match(total_cases1$municipality_town_lst[i], demographic_data$name,0)
+  
+  if (idn > 0){
+    total_cases1$population[i] <- demographic_data$total_population[idn]
+  }
+}
+
+total_cases1 <- total_cases1 %>% mutate(percentage_population = percent(round(total_cases/population,3))) %>% arrange(desc(total_cases))
+
+total_cases1 %>%
+  kable(caption = "Number of confirmed cases per municipality/community") %>%
+    kable_minimal()
+```
+
+```{r, message=FALSE}
+pop_dist <- demographic_data %>%
+              group_by(district_code) %>%
+                summarize(population = sum(total_population, na.rm = TRUE)) %>%
+                  mutate(district_code = as.integer(district_code)) %>%
+                    rename(DIST_CODE = "district_code")
+
+res_dist <- left_join(cyprus_shp@data, ts_covid_data) %>%
+              group_by(DIST_CODE) %>%
+                summarize(total_cases_dist = sum(cases, na.rm = TRUE)) %>%
+                  mutate(percentage_all_cases = percent(round(total_cases_dist / 43890,3))) %>%
+                    arrange(desc(total_cases_dist)) 
+
+res_dist <- left_join(res_dist, pop_dist) %>%
+              mutate(percentage_population = percent(round(total_cases_dist/population,3))) %>%
+               kable(caption = "Number of confirmed cases per district") %>%
+                            kable_minimal()
+
+res_dist
+res_dist %>% save_kable("district_percentages.png")
+```
+
+Below SIR per municipality/community is calculated for the average number of cases during the study's period. There are in total 34 stratum which are defined as a combination of age group and gender. At last, SIR map is for the average cases is displayed.
+
+```{r}
+# Defining the strata combinations which are the combination of gender and age.
+combinations <- names(ts_covid_data[,6:39])
+combinations # there are in total 34 combinations of age and gender
+
+names <- sort(unique(cyprus_shp$municipality_town_lst)) # 325
+
+# Creating a new dataframe all the municipalities/communities for all combinations
+sir_data <- data.frame(rep(names, each = length(combinations)),rep(combinations, length(names)))
+colnames(sir_data) <- c("municipality_town_lst","age_gender")
+
+# Creating a new dataframe which counts the number of cases for each combination of municipality/community, test result date, district, age and gender
+
+covid_data <- covid_data %>% filter(lab_result_date <= as.Date("2021-03-28"))
+sir_df <- covid_data %>%
+            group_by(municipality_town_lst, lab_result_date, district_code, age_group, sex_lst) %>%
+              summarize(cases_age_gender = n())
+
+sir_df$age_group <- str_replace_all(sir_df$age_group, "-", "_") # replacing - with _ in age group
+sir_df$sex_lst <- tolower(sir_df$sex_lst) # lowercase
+sir_df <- sir_df %>% mutate(age_gender = str_replace_all(paste(sex_lst,age_group)," ","_"))
+
+# Joining the two above dataframes
+sir_data_df <- left_join(sir_data,sir_df,by = c("municipality_town_lst" = "municipality_town_lst", "age_gender" = "age_gender"))
+
+# Creating a new dataframe which includes all combinations for each date of each municipality/community
+combinations_df <- rep(rep(combinations, times = 385), times = 615)
+dates_df <- rep(dates, each = 34, times = 615)
+names_df <- rep(unique(cyprus_shp$municipality_town_lst), each = 34*385)
+
+df_1 <- data.frame(names_df, dates_df, combinations_df)
+colnames(df_1) <- c("municipality_town_lst", "lab_result_date", "age_gender")
+
+# Joining this dataframe with the dataframe which contains the information
+sir_df_used <- left_join(df_1, sir_data_df,  by = c("municipality_town_lst" = "municipality_town_lst", "lab_result_date" = "lab_result_date", "age_gender" = "age_gender"))
+```
+
+```{r, message=FALSE}
+sir_df_used <- sir_df_used %>% filter(lab_result_date %in% days_7)
+
+sir_df_used$population <- as.integer(0)
+
+vill_names_dem_data <- unique(demographic_data$name)
+
+for (i in 1:nrow(sir_df_used)) {
+  nm <- sir_df_used$municipality_town_lst[i]
+  idn <- match(nm, vill_names_dem_data, 0)
+
+  if (idn > 0){
+    a <- as.integer(demographic_data[sir_df_used$age_gender[i]][idn,][1])
+    sir_df_used$population[i] <- a
+  }
+  if (idn == 0) {
+    sir_df_used$population[i] <- 0
+  }
+}
+
+sir_df_date <- sir_df_used %>% dplyr::select(1,2,3,7,8)
+sir_df_date[is.na(sir_df_date)] <- 0
+sir_df_date <- sir_df_date %>% mutate(cases_age_gender = as.numeric(cases_age_gender),
+                                      population = as.numeric(population))
+
+sir_df_date <- sir_df_date[order(
+  sir_df_date$municipality_town_lst,
+  sir_df_date$lab_result_date,
+  sir_df_date$age_gender
+), ]
+
+E <- expected(
+  population = sir_df_date$population,
+  cases = sir_df_date$cases_age_gender,
+  n.strata = 34
+)
+
+sir_data1 <- sir_df_date %>%
+              group_by(municipality_town_lst) %>%
+                summarise(Y = sum(cases_age_gender))
+sir_data1$E <- E[seq(1,length(E),56)]
+sir_data1$SIR <- sir_data1$Y / sir_data1$E
+
+cases_average <- ts_covid_data %>% group_by(municipality_town_lst) %>% summarize(cases_average = round(mean(cases)))
+sir_data1 <- left_join(sir_data1,cases_average)
+sir_data1$SIR_average <- sir_data1$cases_average / sir_data1$E
+
+mapsf <- merge(cyprus_shp_sf, sir_data1, by = "municipality_town_lst")
+
+ggplot(mapsf) + geom_sf(aes(fill = SIR_average)) +
+  scale_fill_gradient2(
+    midpoint = 1, low = "blue", mid = "white", high = "red"
+  ) +
+  theme_minimal() + labs(title = "SIR for average number of cases per municipality/community")
+```
+### __*8. Model fitting.*__
+
+Models will be fitted using the INLA package.
+
+Fitting the four models and extracting their relevant outputs.
+```{r}
+model_data <- sir_data1
+model_data[is.na(model_data)] <- 0
+```
+
+```{r}
+rr_plot <- function(data,cyprus_data,fitted_values) {
+  cyprus_data <- cyprus_shp_sf %>% dplyr::select(2,6)
+  map_data <- merge(cyprus_data,model_data,by="municipality_town_lst")
+
+  map_data$RR <- exp(fitted_values[, "mean"])
+  map_data$LL <- fitted_values[, "0.025quant"]
+  map_data$UL <- fitted_values[, "0.975quant"]
+
+  for(j in 1:nrow(map_data)){
+    if(!(map_data$municipality_town_lst[j] %in% vill_names_dem_data | is.na(map_data$SIR[j]))){
+      map_data$RR[j] <- NA
+    }
+  }
+
+  return(map_data)
+}
+```
+
+```{r}
+library(INLA)
+
+prior <- list(
+  prec = list(
+    prior = "pc.prec",
+    param = c(0.5 / 0.31, 0.01)),
+  phi = list(
+    prior = "pc",
+    param = c(0.5, 2 / 3))
+  )
+
+nb <- poly2nb(cyprus_shp)
+nb2INLA("map.adj", nb)
+g <- inla.read.graph(filename = "map.adj")
+```
+
+```{r}
+model_data$idu <- 1:615
+model_data$idv <- 1:615
+
+formula_bym_noise <- cases_average ~ f(idu, model = "besag", graph = g, scale.model = TRUE) + f(idv, model = "iid")
+
+model_bym_noise <- inla(formula = formula_bym_noise,
+                        data = model_data,
+                        family = "poisson",
+                        control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                        control.predictor = list(compute = TRUE)
+                        )
+
+
+rbind(round(model_bym_noise$summary.fixed[-7],2), round(model_bym_noise$summary.hyperpar,2)) %>%
+  kable(caption =  "Summary statistics of the parameters and hyperparameters of the
+post-lockdown BYM model with noise") %>%
+  kable_classic(full_width = FALSE)
+```
+
+```{r}
+map_data1 <- rr_plot(model_data,cyprus_shp_sf,model_bym_noise$summary.linear.predictor)
+
+map_sf1 <- map_data1 %>% st_as_sf()
+  
+gRR1 <- ggplot(map_sf1) + geom_sf(aes(fill = RR)) +
+scale_fill_gradient2(
+  midpoint = 1, low = "blue", mid = "white", high = "red"
+) +
+theme_bw() + labs(title = "BYM with noise")
+
+library(cowplot)
+gRR1
+```
+
+```{r}
+map_data1 %>% 
+  data.frame() %>%
+    dplyr::select(1,RR) %>%
+      dplyr::arrange(desc(RR)) %>%
+        slice(1:10) %>%
+          kable(caption = "Municipalities/communities with the highest RR_BYM with noise") %>%
+            kable_classic(full_width = FALSE)
+```
+
+
+
+
+
+```{r}
+formula_bym_without_noise <- cases_average ~ f(idu, model = "besag", graph = g, scale.model = TRUE)
+
+model_bym_without_noise <- inla(formula_bym_without_noise,
+                                data = model_data,
+                                family = "poisson",
+                                control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                                control.predictor = list(compute = TRUE)
+                                )
+
+rbind(round(model_bym_without_noise$summary.fixed[-7],2), round(model_bym_without_noise$summary.hyperpar,2)) %>%
+  kable(caption =  "Summary statistics of the parameters and hyperparameters of the
+post-lockdown BYM model without noise") %>%
+  kable_classic(full_width = FALSE)
+```
+
+```{r}
+map_data2 <- rr_plot(model_data,cyprus_shp_sf,model_bym_without_noise$summary.linear.predictor)
+
+map_sf2 <- map_data2 %>% st_as_sf()
+  
+gRR2 <- ggplot(map_sf2) + geom_sf(aes(fill = RR)) +
+scale_fill_gradient2(
+  midpoint = 1, low = "blue", mid = "white", high = "red"
+) +
+theme_bw() + labs(title = "BYM without noise")
+
+library(cowplot)
+gRR2
+```
+
+```{r}
+map_data2 %>% 
+  data.frame() %>%
+    dplyr::select(1,RR) %>%
+      arrange(desc(RR)) %>%
+        slice(1:10) %>%
+          kable(caption = "Municipalities/communities with the highest RR-BYM without noise") %>%
+            kable_classic(full_width = FALSE)
+```
+
+
+```{r}
+model_data$id <- 1:615
+
+formula_bym2 <- cases_average ~ f(id, model = "bym2", graph = g)
+
+model_bym2 <- inla(formula_bym2,
+                   data = model_data,
+                   family = "poisson",
+                   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                   control.predictor = list(compute = TRUE)
+                   )
+
+rbind(round(model_bym2$summary.fixed[-7],2), round(model_bym2$summary.hyperpar,2)) %>%
+  kable(caption =  "Summary statistics of the parameters and hyperparameters of the
+post-lockdown BYM2 model without prior") %>%
+  kable_classic(full_width = FALSE)
+```
+```{r}
+map_data3 <- rr_plot(model_data,cyprus_shp_sf,model_bym2$summary.linear.predictor)
+
+map_sf3 <- map_data3 %>% st_as_sf()
+  
+gRR3 <- ggplot(map_sf3) + geom_sf(aes(fill = RR)) +
+scale_fill_gradient2(
+  midpoint = 1, low = "blue", mid = "white", high = "red"
+) +
+theme_bw() + labs(title = "BYM without noise")
+
+library(cowplot)
+gRR3
+```
+
+```{r}
+map_data3 %>% 
+  data.frame() %>%
+    dplyr::select(1,RR) %>%
+      arrange(desc(RR)) %>%
+        slice(1:10) %>%
+          kable(caption = "Municipalities/communities with the highest RR-BYM2 without prior") %>%
+            kable_classic(full_width = FALSE)
+```
+
+```{r}
+formula_bym2_prior <- cases_average ~ f(id, model = "bym2", graph = g, hyper = prior)
+
+model_bym2_prior <- inla(formula_bym2_prior,
+                         data = model_data,
+                         family = "poisson",
+                         control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                         control.predictor = list(compute = TRUE)
+                         )
+
+rbind(round(model_bym2_prior$summary.fixed[-7],2), round(model_bym2_prior$summary.hyperpar,2)) %>%
+  kable(caption =  "Summary statistics of the parameters and hyperparameters of the
+post-lockdown BYM2 model with prior") %>%
+  kable_classic(full_width = FALSE)
+```
+```{r}
+map_data4 <- rr_plot(model_data,cyprus_shp_sf,model_bym2_prior$summary.linear.predictor)
+
+map_sf4 <- map_data3 %>% st_as_sf()
+  
+gRR4 <- ggplot(map_sf4) + geom_sf(aes(fill = RR)) +
+scale_fill_gradient2(
+  midpoint = 1, low = "blue", mid = "white", high = "red"
+) +
+theme_bw() + labs(title = "BYM2 without prior")
+
+library(cowplot)
+gRR4
+```
+
+```{r}
+map_data4 %>% 
+  data.frame() %>%
+    dplyr::select(1,RR) %>%
+      arrange(desc(RR)) %>%
+        slice(1:15) %>%
+          kable(caption = "Municipalities/communities with RR > 1 -BYM2 with prior") %>%
+            kable_classic(full_width = FALSE)
+```
+
+
+
+
+
+
+```{r}
+# Defining the id which discriminates each municipality/community
+model_data$id <- 1:615
+
+# Defining a dataframe with the fitted values from each model
+fitted_vals <- data.frame(c(model_data$cases_average,
+                            model_bym_noise$summary.fitted.values$mean,
+                            model_bym_without_noise$summary.fitted.values$mean,
+                            model_bym2$summary.fitted.values$mean,
+                            model_bym2_prior$summary.fitted.values$mean),
+                            as.character(rep(model_data$municipality_town_lst, times=5)),
+                            rep(c("observed cases","model_bym_noise","model_bym_without_noise",
+                                  "model_bym2","model_bym2_prior"), each=615))
+colnames(fitted_vals) <- c("fitted_vals","municipality_town_lst","model")
+
+geometry <- data.frame(cyprus_shp_sf$geometry, cyprus_shp_sf$municipality_town_lst)
+colnames(geometry) <- c("geometry","municipality_town_lst")
+
+fitted_data <- left_join(fitted_vals,geometry)
+```
+
+
+
+```{r}
+map_models <- fitted_data %>%
+                    st_as_sf() %>%
+                      tm_shape() +
+                        tm_fill(col = "fitted_vals",
+                                palette = "Reds") +
+                          tm_polygons(border.col = "darkgrey",
+                                      border.alpha = 0.5) +
+                            tm_legend(legend.position = c("left", "bottom"), show = FALSE) +
+                              tm_facets(by=c("model"), ncol=3) +
+                                tm_scale_bar(position = c("right", "bottom"), width = 0.15) +
+                                  tm_compass(position = c("left", "top"), size = 1)
+
+map_models
+```
+
+
+```{r}
+map_models_legend <- fitted_data %>%
+                      st_as_sf() %>%
+                        tm_shape() +
+                          tm_fill(col = "fitted_vals",
+                                  palette = "Reds") +
+                            tm_polygons(border.col = "darkgrey",
+                                        border.alpha = 0.5) +
+                              tm_legend(legend.position = c("left", "bottom"), legend.only = TRUE)
+
+map_models_legend
+```
+
+
+```{r}
+DIC <- c(model_bym_noise$dic$dic,model_bym_without_noise$dic$dic,model_bym2$dic$dic,model_bym2_prior$dic$dic)
+
+WAIC <- c(model_bym_noise$waic$waic,model_bym_without_noise$waic$waic,model_bym2$waic$waic,
+          model_bym2_prior$waic$waic)
+
+CPO <- c(sum(model_bym_noise$cpo$cpo),sum(model_bym_without_noise$cpo$cpo),sum(model_bym2$cpo$cpo),
+         sum(model_bym2_prior$cpo$cpo))
+
+model <- c("model_bym_noise","model_bym_without_noise","model_bym2","model_bym2_prior")
+
+
+tibble(model,DIC,WAIC,CPO) %>%
+  kable(caption = "Summary of model selection criteria") %>%
+    kable_classic_2() 
+```
+### __*9. Temporal plots.*__
+
+Pre-processing for investigation spatio-temporal model for Covid-19 in Cyprus.
+
+```{r}
+# Spatio-temporal Covid-19 investigation
+
+# Covid19 data frame
+covid19 <- ts_covid_data_7_days %>% dplyr::select(1,2,3,40,41,42,46)
+# parsing data into a time stamp
+covid19$lab_result_date <- ymd(covid19$lab_result_date)
+# separate date variable into day,week, month and year variables
+covid19$day <- day(covid19$lab_result_date)
+covid19$week <- week(covid19$lab_result_date) # week of the year
+
+# join dfs
+cyprus_shp_sf$id <- as.integer(0:614)
+covid19_spt <- left_join(covid19,cyprus_shp_sf, by= "municipality_town_lst") 
+covid19_spt$district_name <- ifelse(covid19_spt$DIST_CODE ==1, "Lefkosia",
+                                    ifelse(covid19_spt$DIST_CODE==3, "Ammochostos",
+                                           ifelse(covid19_spt$DIST_CODE==4, "Larnaka",
+                                                  ifelse(covid19_spt$DIST_CODE==5, "Lemesos",
+                                                         ifelse(covid19_spt$DIST_CODE==6, "Pafos", "Keryneia")))))
+covid19_spt <- covid19_spt %>% dplyr::select(1,2,4,5,6,7,8,9,14,15) %>% st_as_sf()
+
+
+# identifying spatial fields
+spat_part <- as(dplyr::select(covid19_spt, -c(cases_week, csum_cases, lab_result_date, month, year,week,day,id)), Class = "Spatial")
+
+# identifying temporal fields
+temp_part <- covid19_spt$lab_result_date
+
+# identifying data
+covid19_data <- covid19_spt %>% dplyr::select(c(lab_result_date, cases_week, csum_cases,month, year,week,day,id)) %>%
+  as.data.frame()
+
+# construct STIDF object
+covid19_stobj <- STIDF(sp = spat_part, # spatial fields
+                time = temp_part, # time fields
+                data = covid19_data) # data
+
+# select pop data
+pop <- demographic_data %>% dplyr::select("name", "total_population") %>% rename(municipality_town_lst = "name")
+
+# join dfs
+covid19_spt <- dplyr::left_join(covid19_spt, pop, by = "municipality_town_lst")
+covid19<- dplyr::left_join(covid19, pop, by = "municipality_town_lst")
+
+# rate of new covid-19 infection
+covid19_spt$n_covid19_r <- round((covid19_spt$cases_week / covid19_spt$total_population)*1000)
+covid19$n_covid19_r <- round((covid19$cases_week / covid19$total_population)*1000)
+
+# risk of cumulative covid-19 infection
+covid19_spt$c_covid19_r <- round((covid19_spt$csum_cases / covid19_spt$total_population)*1000)
+covid19$c_covid19_r <- round( (covid19$csum_cases / covid19$total_population)*1000)
+```
+
+```{r}
+ggplot(data = dplyr::filter(covid19_spt, total_population > 3000), 
+           mapping = aes(x= lab_result_date, y= reorder(municipality_town_lst, n_covid19_r), fill= n_covid19_r)) +
+  geom_tile() +
+  scale_fill_viridis(option ="plasma") +
+  theme_minimal() + 
+  labs(title= "New Cases per 1000 for population over 3000", x="Date", y="Municipality/Community") +
+  theme(legend.position = "bottom") + 
+  theme(axis.text.y = element_text(size=4)) +
+  theme(axis.text.x = element_text(size=7)) +
+  theme(axis.title=element_text(size=7, face="plain")) +
+  theme(legend.key.width = unit(5, "cm"), legend.key.height = unit(2, "cm"))
+```
+
+```{r}
+# compute empirical spatial mean
+sp_av <- covid19_spt %>% filter(total_population > 3000) %>% group_by(municipality_town_lst) %>% # group by spatial unit
+  summarise(sp_mu_emp = mean(n_covid19_r)) 
+
+# plot empirical spatial mean
+ggplot(data=sp_av) +
+  geom_col( aes( y = reorder(municipality_town_lst, sp_mu_emp), x = sp_mu_emp) , fill = "grey50") +
+  theme_classic() +
+  labs(title= paste(" "), x="Average New Cases per 1,000", y="Municipality/Community") +
+  theme(legend.position = "bottom") +
+  theme(axis.text.y = element_text(size=3)) +
+  theme(axis.text.x = element_text(size=3)) +
+  theme(axis.title=element_text(size=10, face="plain"))
+```
+
+```{r}
+# compute temporal mean
+tm_av <- covid19 %>% group_by(lab_result_date) %>%
+  summarise(tm_mu_emp = mean(n_covid19_r,na.rm = TRUE))
+
+# plot temporal mean + trends for all spatial units
+ggplot() +
+  geom_line(data = covid19, mapping = aes(x =lab_result_date, y = n_covid19_r,
+                          group = municipality_town_lst), color = "gray80") +
+   theme_classic() +
+  geom_smooth(data = tm_av, mapping = aes(x =lab_result_date, y = tm_mu_emp),
+              alpha = 0.5,
+              se = FALSE) +
+    labs(title= paste(" "), x="Date", y="Weekly cases rate per 1,000 people") +
+    theme_classic() +
+    theme(plot.title=element_text(size = 15)) +
+    theme(axis.text=element_text(size=14)) +
+    theme(axis.title.y = element_text(size = 10)) +
+    theme(axis.title.x = element_text(size = 10)) +
+    theme(plot.subtitle=element_text(size = 10)) +
+    theme(axis.title=element_text(size=15, face="plain"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
